@@ -1,0 +1,29 @@
+# Data (root-level only, not src/data/)
+/data/
+/embeddings/
+
+# Hydra outputs
+outputs/
+multirun/
+
+# W&B
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Model artifacts
+*.pt
+*.pth
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
