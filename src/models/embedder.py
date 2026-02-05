@@ -40,7 +40,7 @@ class ESM2Embedder:
         """Embed a single amino acid sequence.
 
         Returns a 1D tensor of shape (embedding_dim,) — mean-pooled over
-        all sequence positions.
+        sequence positions, excluding special tokens.
         """
         inputs = self.tokenizer(
             sequence,
@@ -53,8 +53,12 @@ class ESM2Embedder:
         outputs = self.model(**inputs)
         hidden_states = outputs.last_hidden_state  # (1, seq_len, embed_dim)
 
-        # Mean pool over all positions
+        # Mean pool over sequence positions, excluding [CLS] and [EOS] tokens
         attention_mask = inputs["attention_mask"]
+        # Mask out special tokens (first and last positions)
+        attention_mask[:, 0] = 0
+        attention_mask[:, -1] = 0
+
         masked_hidden = hidden_states * attention_mask.unsqueeze(-1)
         embedding = masked_hidden.sum(dim=1) / attention_mask.sum(dim=1, keepdim=True)
 
