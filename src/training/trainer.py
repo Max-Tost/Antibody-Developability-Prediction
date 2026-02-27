@@ -1,10 +1,16 @@
-"""Training loop with k-fold cross-validation and evaluation."""
+"""Training loop with k-fold cross-validation, W&B logging, and evaluation.
+
+Handles the full train/evaluate cycle including early stopping,
+metric computation, and per-fold aggregation.
+"""
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 from sklearn.metrics import (
     f1_score,
     precision_score,
@@ -123,31 +129,55 @@ def train_fold(
     criterion = nn.BCEWithLogitsLoss()
 
     best_auc = 0.0
-    best_metrics = {}
+    patience_counter = 0
 
     for epoch in range(cfg["training"]["max_epochs"]):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, val_metrics = evaluate(model, val_loader, criterion, device)
 
+        wandb.log(
+            {
+                f"fold_{fold}/train_loss": train_loss,
+                f"fold_{fold}/val_loss": val_loss,
+                f"fold_{fold}/val_auc": val_metrics["auc_roc"],
+                f"fold_{fold}/val_f1": val_metrics["f1"],
+                "epoch": epoch,
+            }
+        )
+
+        # Early stopping on validation AUC
         if val_metrics["auc_roc"] > best_auc:
             best_auc = val_metrics["auc_roc"]
             best_metrics = val_metrics.copy()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= cfg["training"]["patience"]:
+                logger.info(f"Fold {fold}: early stopping at epoch {epoch}")
+                break
 
     logger.info(f"Fold {fold}: best AUC = {best_auc:.4f}")
     return best_metrics
 
 
 def run_kfold_training(cfg: dict) -> None:
-    """Run k-fold cross-validation training pipeline."""
+    """Run k-fold cross-validation training pipeline.
+
+    Args:
+        cfg: Hydra config dict with keys: model, data, embedder, training.
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Load full dataset
     dataset = AntibodyDataset(
         csv_path=cfg["data"]["train_csv"],
         embeddings_dir=cfg["data"]["embeddings_dir"],
     )
 
+    # Extract labels for stratification
     labels = dataset.df["label"].values
 
+    # K-fold cross-validation
     kfold = StratifiedKFold(
         n_splits=cfg["training"]["n_folds"],
         shuffle=True,
@@ -155,6 +185,12 @@ def run_kfold_training(cfg: dict) -> None:
     )
 
     fold_metrics: list[dict[str, float]] = []
+
+    wandb.init(
+        project=cfg["wandb"]["project"],
+        config=dict(cfg),
+        name=f"{cfg['model']['type']}_{cfg['training']['n_folds']}fold",
+    )
 
     for fold, (train_idx, val_idx) in enumerate(kfold.split(labels, labels)):
         logger.info(f"--- Fold {fold + 1}/{cfg['training']['n_folds']} ---")
@@ -170,6 +206,9 @@ def run_kfold_training(cfg: dict) -> None:
         values = [m[key] for m in fold_metrics]
         aggregated[f"mean_{key}"] = np.mean(values)
         aggregated[f"std_{key}"] = np.std(values)
+
+    wandb.log(aggregated)
+    wandb.finish()
 
     logger.info("=== Cross-validation results ===")
     for key in ["auc_roc", "precision", "recall", "f1"]:
