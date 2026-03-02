@@ -1,0 +1,29 @@
+# Antibody Developability Prediction — Hydra Config
+
+model:
+  type: mlp             # "mlp" or "linear"
+  input_dim: 1280       # ESM-2 650M embedding dimension
+  hidden_dim: 256       # MLP hidden layer size
+  dropout: 0.3          # MLP dropout rate
+
+data:
+  processed_dir: data/processed
+  embeddings_dir: embeddings
+  train_csv: data/processed/train.csv
+  val_csv: data/processed/val.csv
+  test_csv: data/processed/test.csv
+
+embedder:
+  model_name: facebook/esm2_t33_650M_UR50D
+  device: auto          # "auto", "cuda", or "cpu"
+
+training:
+  max_epochs: 100
+  batch_size: 32
+  learning_rate: 0.001
+  patience: 10          # Early stopping patience (epochs)
+  n_folds: 5            # K-fold cross-validation
+  random_seed: 42
+
+wandb:
+  project: antibody-developability
