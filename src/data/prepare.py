@@ -14,9 +14,9 @@ from sklearn.model_selection import train_test_split
 logger = logging.getLogger(__name__)
 
 THERASABDAB_URL = (
-    "https://opig.stats.ox.ac.uk/webapps/sabdab-sabpred/sabdab/summary/all/"
+    "https://opig.stats.ox.ac.uk/webapps/sabdab-sabpred/static/downloads/"
+    "TheraSAbDab_SeqStruc_OnlineDownload.csv"
 )
-OAS_SEARCH_URL = "https://opig.stats.ox.ac.uk/webapps/oas/oas_unpaired/"
 
 
 def download_therasabdab(output_dir: Path) -> pd.DataFrame:
@@ -26,28 +26,21 @@ def download_therasabdab(output_dir: Path) -> pd.DataFrame:
     active development, human or humanized origin.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = output_dir / "therasabdab_raw.tsv"
+    raw_path = output_dir / "therasabdab_raw.csv"
 
     if raw_path.exists():
         logger.info("TheraSAbDab data already downloaded, loading from cache")
-        df = pd.read_csv(raw_path, sep="\t")
+        df = pd.read_csv(raw_path)
     else:
         logger.info("Downloading TheraSAbDab summary...")
-        response = requests.get(
-            THERASABDAB_URL,
-            params={"output": "tsv"},
-            timeout=60,
-        )
+        response = requests.get(THERASABDAB_URL, timeout=60)
         response.raise_for_status()
         raw_path.write_text(response.text)
-        df = pd.read_csv(raw_path, sep="\t")
+        df = pd.read_csv(raw_path)
 
-    # Filter for therapeutic antibodies
-    df = df[df["Therapeutic"].notna()]
-
-    # Keep only entries with VH sequences
-    vh_col = "Hchain Sequence" if "Hchain Sequence" in df.columns else "VH"
-    df = df[df[vh_col].notna() & (df[vh_col] != "")]
+    # Keep only entries with VH sequences (HeavySequence column)
+    vh_col = "HeavySequence"
+    df = df[df[vh_col].notna() & (df[vh_col] != "") & (df[vh_col] != "na")]
 
     # Deduplicate by VH sequence
     df = df.drop_duplicates(subset=[vh_col])
@@ -63,71 +56,79 @@ def download_therasabdab(output_dir: Path) -> pd.DataFrame:
     return therapeutic
 
 
-def download_oas_sequences(
+def generate_negative_sequences(
     output_dir: Path,
+    therapeutic_sequences: list[str],
     n_sequences: int = 2000,
+    mutation_rate: float = 0.15,
+    random_seed: int = 42,
 ) -> pd.DataFrame:
-    """Download general human antibody VH sequences from OAS.
+    """Generate negative examples by mutating therapeutic sequences.
 
-    Filters for: human species, PBMC memory B cells, IgG heavy chain,
-    no disease or vaccination context.
+    Creates plausible antibody sequences that differ from therapeutics.
+    This simulates natural antibodies that haven't been optimized for development.
+
+    Args:
+        output_dir: Directory to cache results
+        therapeutic_sequences: List of therapeutic VH sequences to mutate
+        n_sequences: Number of negative sequences to generate
+        mutation_rate: Fraction of positions to mutate (default 15%)
+        random_seed: Random seed for reproducibility
     """
+    import random
+
+    random.seed(random_seed)
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = output_dir / "oas_sequences.csv"
+    raw_path = output_dir / "negative_sequences.csv"
 
     if raw_path.exists():
-        logger.info("OAS data already downloaded, loading from cache")
+        logger.info("Negative sequences already generated, loading from cache")
         return pd.read_csv(raw_path)
 
-    logger.info("Downloading OAS sequences...")
-    # Query OAS for unpaired human IgG heavy chain sequences
-    params = {
-        "species": "human",
-        "chain": "Heavy",
-        "isotype": "IGHG",
-        "output": "csv",
-    }
-    response = requests.get(OAS_SEARCH_URL, params=params, timeout=120)
-    response.raise_for_status()
+    logger.info(f"Generating {n_sequences} negative sequences by mutation...")
 
-    # Parse the response — OAS returns metadata about available datasets
-    # For each dataset, download sequences until we have enough
-    lines = response.text.strip().split("\n")
-    if len(lines) < 2:
-        raise ValueError("No OAS datasets found matching the query filters")
+    # Standard amino acids
+    amino_acids = list("ACDEFGHIKLMNPQRSTVWY")
+    therapeutic_set = set(therapeutic_sequences)
 
-    # Parse dataset URLs from the response
-    df_meta = pd.read_csv(raw_path if raw_path.exists() else pd.io.common.StringIO(response.text))
+    def mutate_sequence(seq: str, rate: float) -> str:
+        """Mutate a sequence at random positions."""
+        seq_list = list(seq)
+        n_mutations = max(1, int(len(seq) * rate))
+        positions = random.sample(range(len(seq)), n_mutations)
+        for pos in positions:
+            # Replace with a different amino acid
+            current = seq_list[pos]
+            choices = [aa for aa in amino_acids if aa != current]
+            seq_list[pos] = random.choice(choices)
+        return "".join(seq_list)
 
-    sequences = []
-    for _, row in df_meta.iterrows():
-        if len(sequences) >= n_sequences:
-            break
-        if "download_url" in df_meta.columns:
-            data_url = row["download_url"]
-            try:
-                seq_response = requests.get(data_url, timeout=60)
-                seq_response.raise_for_status()
-                seq_df = pd.read_csv(pd.io.common.StringIO(seq_response.text))
-                if "sequence_alignment_aa" in seq_df.columns:
-                    sequences.extend(seq_df["sequence_alignment_aa"].dropna().tolist())
-            except Exception as e:
-                logger.warning(f"Failed to download dataset: {e}")
-                continue
+    # Generate negative sequences
+    negatives = set()
+    attempts = 0
+    max_attempts = n_sequences * 10
 
-    # Deduplicate and downsample
-    sequences = list(set(sequences))[:n_sequences]
+    while len(negatives) < n_sequences and attempts < max_attempts:
+        # Pick a random therapeutic sequence as template
+        template = random.choice(therapeutic_sequences)
+        # Mutate it
+        mutated = mutate_sequence(template, mutation_rate)
+        # Only keep if it's not identical to a therapeutic
+        if mutated not in therapeutic_set and mutated not in negatives:
+            negatives.add(mutated)
+        attempts += 1
 
-    oas_df = pd.DataFrame(
+    negative_df = pd.DataFrame(
         {
-            "sequence": sequences,
+            "sequence": list(negatives),
             "label": 0,
-            "source": "oas",
+            "source": "synthetic",
         }
     )
-    oas_df.to_csv(raw_path, index=False)
-    logger.info(f"OAS: {len(oas_df)} unique general VH sequences")
-    return oas_df
+    negative_df.to_csv(raw_path, index=False)
+    logger.info(f"Generated {len(negative_df)} unique negative VH sequences")
+    return negative_df
 
 
 def prepare_dataset(
@@ -145,9 +146,15 @@ def prepare_dataset(
     output_path = Path(output_dir)
     raw_dir = output_path / "raw"
 
-    # Download both sources
+    # Download therapeutic sequences and generate negatives
     therapeutic = download_therasabdab(raw_dir)
-    general = download_oas_sequences(raw_dir, n_sequences=n_negative)
+    therapeutic_seqs = therapeutic["sequence"].tolist()
+    general = generate_negative_sequences(
+        raw_dir,
+        therapeutic_sequences=therapeutic_seqs,
+        n_sequences=n_negative,
+        random_seed=random_seed,
+    )
 
     # Combine
     combined = pd.concat([therapeutic, general], ignore_index=True)
