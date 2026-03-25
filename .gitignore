@@ -30,4 +30,7 @@ build/
 
 # Claude Code
 CLAUDE.md
-notebooks/
+
+# Notebooks (keep data_access/ for research docs)
+notebooks/*
+!notebooks/data_access/

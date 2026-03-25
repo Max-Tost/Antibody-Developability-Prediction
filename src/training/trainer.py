@@ -5,7 +5,6 @@ metric computation, and per-fold aggregation.
 """
 
 import logging
-from pathlib import Path
 
 import numpy as np
 import torch
